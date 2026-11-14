@@ -1,0 +1,119 @@
+# Release contract
+
+Releases are published to `CaptureContext/fxclaude` as GitHub Releases. Release
+tags must be plain semantic versions without a `v` prefix, for example `1.2.3`.
+The release workflow creates the tag only after all artifacts pass validation.
+Its version must match `AppCommand.version` exactly.
+
+Each release must contain the dependency snapshot used by every release build,
+raw architecture-specific and universal executables, and a SHA-256 checksum
+file for each executable:
+
+```text
+Package.resolved
+fxclaude-aarch64-apple-darwin
+fxclaude-aarch64-apple-darwin.sha256
+fxclaude-x86_64-apple-darwin
+fxclaude-x86_64-apple-darwin.sha256
+fxclaude-universal-apple-darwin
+fxclaude-universal-apple-darwin.sha256
+```
+
+The checksum file starts with the lowercase or uppercase hexadecimal SHA-256
+digest. Additional filename text after whitespace is allowed.
+
+Run the `Release` workflow manually from the `main` branch and enter the release
+version. The workflow pins every job to that commit, resolves dependencies
+once, requires both architecture jobs to use that exact `Package.resolved`,
+tests and builds natively on Apple silicon and Intel runners, and combines those
+exact binaries into the universal executable. The publish job uses the
+`release` environment and shared CaptureContext organization credentials
+to sign and notarize all three executables. Checksums are generated after
+signing and verified. Only after every check succeeds does the workflow create
+the tag and publish the GitHub Release together. Before running the workflow:
+
+1. Set `AppCommand.version` to the release version.
+2. Build and test both architectures.
+3. Commit and push the release-ready state to `main`.
+
+The release job signs every executable with the hardened runtime, the
+entitlements in `Scripts/fxclaude.entitlements`, and a secure timestamp before submitting them together to Apple's notary service. Raw
+command-line executables cannot carry a stapled ticket, so Gatekeeper retrieves
+their notarization tickets online using the signed code hashes. The workflow
+verifies the signatures and online tickets before publishing any assets.
+
+The entitlements grant `com.apple.security.automation.apple-events`. `open-url`
+delivers links to a running Claude instance with a `kAEGetURL` Apple Event, and
+the hardened runtime rejects Apple Events from a signed binary without this
+entitlement (`errAEEventNotPermitted`, with no permission prompt). Local
+`make` builds are ad hoc signed without the hardened runtime and are not
+affected.
+
+Grant `CaptureContext/fxclaude` access to these organization Actions secrets:
+
+- `DEVELOPER_ID_CERTIFICATE_P12_BASE64`
+- `DEVELOPER_ID_CERTIFICATE_PASSWORD`
+- `APP_STORE_CONNECT_API_KEY_P8_BASE64`
+- `HOMEBREW_TAP_DISPATCH_TOKEN`
+
+Grant the repository access to these organization Actions variables:
+
+- `APP_STORE_CONNECT_KEY_ID`
+- `APP_STORE_CONNECT_ISSUER_ID`
+
+The workflow reads credentials through `secrets` and the key and issuer IDs
+through `vars`. Avoid duplicate repository or environment settings with the
+same names, because they override the organization settings. The Homebrew
+token must be able to dispatch events to `CaptureContext/homebrew-tap`.
+
+The certificate archive must contain a Developer ID Application identity. The
+API key must have permission to submit software to Apple's notarization service.
+The environment deployment policy must allow the `main` branch.
+
+`Package.resolved` remains ignored during normal development. The release
+workflow generates it in a dedicated job, shares it with both architecture
+jobs, and verifies it with `swift package resolve --force-resolved-versions`
+before testing or building. It then publishes the same file as a release asset.
+This makes the dependency graph traceable and consistent across release
+artifacts without committing the local resolver state.
+
+GitHub's automatic source archives do not contain this ignored file. To
+reproduce a release, download its source archive and `Package.resolved`, place
+the resolved file at the package root, and run:
+
+```sh
+swift package resolve --force-resolved-versions
+make test
+make release
+```
+
+## Universal executable
+
+The universal executable runs natively on both Apple silicon and Intel Macs and
+is the default artifact for manual and frontend-managed installations. Build it
+locally with:
+
+```sh
+make universal
+```
+
+This delegates to `Scripts/build-universal.sh`, builds both `arm64` and
+`x86_64` slices with a macOS 14 deployment target, and writes these files:
+
+```text
+dist/fxclaude-universal-apple-darwin
+dist/fxclaude-universal-apple-darwin.sha256
+```
+
+The script uses separate per-architecture scratch directories and SwiftPM's
+native build engine. This keeps build-tool and macro-plugin executables on the
+host architecture while Xcode 27 cross-compiles the Intel product slice. Xcode
+27 ships an arm64-only Swift toolchain, so running the compiler under Rosetta
+is neither required nor supported.
+
+Override `OUTPUT_PATH` when invoking the script directly to place the binary
+elsewhere.
+
+fxclaude has no self-updater yet. Users update by installing a newer release
+artifact or through Homebrew once the formula exists in
+`CaptureContext/homebrew-tap`.
